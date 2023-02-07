@@ -1,0 +1,258 @@
+---
+title: This script will read the spatial point patterns generated for the MDA and
+  SGH cohorts and determine the clustering of cells through pair-correlation function
+author: "Gayatri Kumar"
+date: "06/02/2023"
+Contact: "gkumar@mdanderson.org, gayatri@iisc.ac.in" 
+output: html_document
+---
+
+```{r}
+#Load relevant libraries
+
+library(spatstat)
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+library(readxl)
+library(spatstat.core)
+library(spatstat.local)
+```
+
+
+```{r}
+# Given a point pattern this function will estimate the pcf
+
+estimate_pcf <- function(point.pattern) {   # (read.file)
+  
+  # Estimate the K-function and the pcf
+  K <- Kest(point.pattern)
+  pcf.pp <- pcf(K, spar = 0.5)
+  pcf.pp <- pcf.pp %>% filter(r <= 600)
+  return(pcf.pp)
+}
+
+```
+
+
+
+```{r}
+names_markers <- c("Mp2p6n" , "Mn2p6p" , "Mp2n6p" , "Mp2p6p" , 
+                   "Mn2n6n" , "Mp2n6n" , "Mn2p6n" , "Mn2n6p" , 
+                   "CD20ng")
+```
+
+```{r}
+# Function that can detrmine the pcf values for a range of Radius values.
+
+getPCFdata <- function(pcflist, marker_name) { 
+  pcflist$r <- data.frame(r = double())
+  pcflist$g <- data.frame(r = double())
+  pcflist$Count <- 0
+  
+  # Define counter
+  count <- 0
+  
+  # Iterate through the files
+  for (i in pcflist$files) {
+    
+    # Increment the count
+    count <- count + 1
+    image.id <- paste("image", as.character(count), sep = "_")
+    print(paste("Working on file no.", count, "File name:", image.id))
+    
+    # Read the rds file and compute the pcf 
+    read.file <- readRDS(i)
+    print(paste("No. of points in the point pattern:", read.file$n))
+    marker <- read.file[marks(read.file) %in% marker_name, drop=TRUE]
+    print(paste("No. of points in the subset point pattern:", marker$n))
+    
+    # If there are points in the point pattern
+    if ( marker$n >50) {
+      
+      # Increase the count
+      pcflist$Count <- pcflist$Count + 1   
+      
+      # Find pcf
+      pcf <- estimate_pcf(marker)
+      
+      # Add pcf to the dataframe
+      pcflist$r <- cbind.fill(pcflist$r, pcf$r )#, fill = NA)
+      pcflist$g <- cbind.fill(pcflist$g, pcf$pcf) #, fill = NA)
+      
+      # Make column names 
+      colnames(pcflist$r)[pcflist$Count+1] <- image.id
+      colnames(pcflist$g)[pcflist$Count+1] <- image.id
+    }
+  } 
+  return(pcflist)
+}
+
+```
+
+```{r}
+cbind.fill <- function(...){
+  nm <- list(...) 
+  nm <- lapply(nm, as.matrix)
+  n <- max(sapply(nm, nrow)) 
+  do.call(cbind, lapply(nm, function (x) 
+  rbind(x, matrix(, n-nrow(x), ncol(x))))) 
+}
+
+```
+
+```{r}
+# This function will remove the outliers
+remove_outliers <- function(my_data_frame) {
+  
+  # Find the quartiles and inter quartile ranges
+  Q <- quantile(my_data_frame$value, probs=c(.25, .75), na.rm = FALSE)
+  iqr <- IQR(my_data_frame$value)
+  up <-  Q[2]+1.5*iqr  # Upper Range  
+  low <- Q[1]-1.5*iqr  # Lower Range
+  
+  # Eliminate the outliers and return
+  eliminated <- subset(my_data_frame, my_data_frame$value > (Q[1] - 1.5*iqr) & my_data_frame$value < (Q[2]+1.5*iqr))
+  return(eliminated)
+}
+```
+
+
+```{r}
+# Get the spatial point pattern files for MDA and SGH cohorts
+NUS_Path <- list.files("Path/to/Folder/All_point_patterns/", full.names = TRUE)
+
+# Define the data frames to append the output of getPCFdata
+pcf.nus <- list()
+
+#initiating list of lists for different sub-populations
+for(i in c(1:9)) { 
+  add_list <- list(i=list())
+  names(add_list) <- paste0("g", i)
+  pcf.nus <- c(pcf.nus , add_list)
+}
+
+#storing file names and running getPCFdata to obtain R and g(R) values
+
+for (i in 1 : length(pcf.nus)) {
+  pcf.nus[[i]] <- list(files = NUS_Path)
+  pcf.nus[[i]] <- getPCFdata(pcf.nus[[i]], names_markers[i])
+  pcf.nus[[i]]$r <- pcf.nus[[i]]$r[,1:ncol(pcf.nus[[i]]$r)]
+  pcf.nus[[i]]$g <- pcf.nus[[i]]$g[,1:ncol(pcf.nus[[i]]$g)]
+}
+```
+
+```{r}
+#Creating the combined dataframe with g(r) values grouped as per sub-populations
+df.g <- data_frame()
+for(i in c(1:9)) {
+  temp_unlist <- unlist(pcf.nus[[i]]$g)
+  temp_unlist <- temp_unlist[temp_unlist >0]
+  temp_unlist <- temp_unlist[!is.na(temp_unlist)]
+  assign(paste0("df.gg" , i) , data.frame(group=names_markers[i], value=temp_unlist))
+  temp=get(paste0("df.gg",i))
+  df.g <- rbind(df.g , temp)
+}
+
+```
+
+
+```{r}
+#Storing R and g(R) values for the different subpopulations
+R_vals <- c(1:600)
+Full_subpopulations <- list()
+for(i in c(1:9)) { 
+  add_list <- list(i=list())
+  names(add_list) <- paste0(names_markers[i])
+  Full_subpopulations<- c(Full_subpopulations , add_list)
+}
+
+for (m in c(1:9)) {
+  Full_subpopulations[[m]]$r <- pcf.nus[[m]]$r
+  Full_subpopulations[[m]]$g <- pcf.nus[[m]]$g
+  
+  colnames_full <- c()
+  counter <- 1
+  for (i in colnames(pcf.nus[[m]]$g)) {
+    name_string <- as.integer(str_saveRDS(i, "_")[[1]][2])
+    file_sgh_name <- str_saveRDS(pcf.nus[[m]]$files[name_string], "/")[[1]][7]
+    file_title <- str_saveRDS(file_sgh_name , ".RDS")[[1]][1]
+    read_file <- readRDS(pcf.nus[[m]]$files[name_string])
+    colnames_full <- append(colnames_full ,file_title )
+
+    counter  <- counter + 1
+  }
+  Full_subpopulations[[m]]$r <- as.data.frame(Full_subpopulations[[m]]$r)
+  Full_subpopulations[[m]]$g <- as.data.frame(Full_subpopulations[[m]]$g)
+  names(Full_subpopulations[[m]]$r) <- colnames_full
+  names(Full_subpopulations[[m]]$g) <- colnames_full
+}
+
+```
+
+
+```{r}
+#Removing outliers for each image for all the sub-populations
+
+for ( m in c(1:9)) {
+  colnames_sgh_eliminated <- c()
+  assign(paste0("Full_eliminated_" , names_markers[m]) , data.frame())
+  len_list <- length(get(paste0("Full_subpopulations" ))[[m]])
+  counter <- 0
+  for (i in 1 : len_list) # For all images in each sub-population
+    { 
+    #This loop iterates through images within each sub-population
+    temp <- get(paste0("Full_subpopulations" ))[[m]][i]
+    temp <- as.data.frame(temp)
+    temp[is.na(temp)] = 0
+    column_name <- colnames(temp)
+    colnames_sgh_eliminated <- append(colnames_sgh_eliminated , column_name)
+    G_vals_eliminated <- c()
+    remove_entries <- remove_outliers(temp)
+    
+  for (k in remove_entries[[1]]) #for the filtered set from each image
+    {
+      v<- match(k , temp[[1]])
+      g_vals_eliminated <- temp[[1]][v]
+      G_vals_eliminated[v] = g_vals_eliminated
+   }
+  if (counter == 0) {
+    assign(paste0("Full_eliminated_" , names_markers[m]) ,   cbind(G_vals_eliminated))
+  }
+  if (counter >0) {
+    assign(paste0("Full_eliminated_" , names_markers[m]) ,  cbind( get(paste0("Full_eliminated_" , names_markers[m])) , G_vals_eliminated))
+  }
+  counter <- counter + 1
+  
+  }
+  temp1 <- get(paste0("Full_eliminated_" , names_markers[m]))
+  rownames(temp1) <- rownames(R_vals, do.NULL = FALSE, prefix = "Rvalue_")
+  temp1 <- as.data.frame(temp1)
+  names(temp1) <- colnames_sgh_eliminated
+  temp1[is.na(temp1)] = 0
+  assign(paste0("Full_eliminated_" , names_markers[m]) ,temp1)
+}
+
+```
+
+
+```{r}
+# Storing the outlier removed g(R) and corresponding R values by the marker name (eg:Mp2p6n is a marker)
+for (m in c(1:9)) {
+  name_subpopl <- paste0("Full_eliminated_" , names_markers[m] , ".RData", sep='')
+  t <- get(paste0("Full_eliminated_" ,names_markers[m]))
+  saveRDS( t , file=paste0("/Users/Path/pcf/results/" ,name_subpopl , sep="")) 
+}
+
+for (m in c(1:9)) {
+  name_subpopl <- paste0("Subpopulation_" , names_markers[m]  , ".RData", sep='')
+  r_values <- as.data.frame(Full_subpopulations[[m]][1])
+  g_values <- as.data.frame(Full_subpopulations[[m]][2])
+  R_tag <- paste0("/Users/Path/subpop_csv/" , names_markers[m] ,"_R.csv" , sep="")
+  G_tag <- paste0("/Users/Path/subpop_csv/" , names_markers[m] ,"_G.csv" , sep="")
+  write.csv(r_values,R_tag, row.names = FALSE)
+  write.csv(g_values,G_tag, row.names = FALSE)
+  saveRDS( Full_subpopulations[[m]] , file=paste0("/Users/Path/subpopulation_matrices/" ,name_subpopl , sep="")) 
+}
+```
+

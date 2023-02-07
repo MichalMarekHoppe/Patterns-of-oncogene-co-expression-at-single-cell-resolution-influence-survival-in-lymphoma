@@ -1,0 +1,256 @@
+---
+title: "Myc_code"
+author: "Shruti"
+date: "06/02/2023"
+output: html_document
+---
+
+```{r}
+
+# Load libraries
+
+library(dplyr)
+library(tidyverse)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+```
+
+
+```{r}
+#Read in data and annotate with cell and study 
+
+## Annotation from Roider et al 
+
+annot <- read.csv("~/Downloads/AnnotationBcells.csv")
+annot <- data.frame(annot,do.call(rbind,str_split(annot$Sample,";")))
+annot <- annot[,-c(1)]
+colnames(annot) <- c("Sample", "Barcode", "Population")
+
+## DLBCL sample 1 
+
+dlbc.l1 <- Read10X(data.dir="~/Downloads/DLBCL1/")
+l1 <- CreateSeuratObject(counts = dlbc.l1, project = "L1", min.cells = 3, min.features = 200)
+l1@meta.data$study <- "Roider"
+annot_l1 <- annot %>% dplyr::filter(Population == "MalignantB" & Sample == "DLBCL1")
+annot_l1$Barcode <- paste0( annot_l1$Barcode, "-1")
+l1_b <- subset(l1, cells = annot_l1$Barcode)
+l1_b@meta.data$annotation <- annot_l1$Population
+l1_b@meta.data$COO <- "GCB"
+
+## DLBCL sample 3
+
+dlbc.l3 <- Read10X(data.dir="~/Downloads/DLBCL3/")
+l3 <- CreateSeuratObject(counts = dlbc.l3, project = "L3", min.cells = 3, min.features = 200)
+l3@meta.data$study <- "Roider"
+annot_l3 <- annot %>% dplyr::filter(Population == "MalignantB" & Sample == "DLBCL3")
+annot_l3$Barcode <- paste0( annot_l3$Barcode, "-1")
+l3_b <- subset(l3, cells = annot_l3$Barcode)
+l3_b@meta.data$annotation <- annot_l3$Population
+l3_b@meta.data$COO <- "ABC"
+
+## Steen dataset 
+
+dat=fread( "~/Downloads/GSE182434_raw_count_matrix.txt.gz",data.table = F)  
+dim(dat) 
+dat[1:4,1:4]
+rownames(dat)=dat[,1]
+dat=dat[,-1]
+dat[1:4,1:4] 
+annotation = fread( "~/Downloads/GSE182434_cell_annotation.txt.gz",data.table = F)
+annotation[1:4,1:4]
+table(annotation$Patient,annotation$CellType) 
+sample = c("DLBCL002","DLBCL007","DLBCL008","DLBCL111")
+annotation = annotation[annotation$Patient %in% sample,]
+dat = dat[,annotation$ID]
+
+
+l4 <- CreateSeuratObject(counts = dat, project = "L4", min.cells = 3, min.features = 200)
+l4@meta.data$annotation <- annotation$CellType
+l4@meta.data$type <- annotation$TumorNormal
+l4@meta.data$COO <- annotation$COO
+l4_b <- subset(l4, annotation == "B cells")
+l4_bm <- subset(l4_b, type == "Tumor")
+l4_bm@meta.data$study <- "Steen"
+
+```
+
+```{r}
+#Merge datasets 
+
+m26 <- merge(x=l1_b, y=c(l3_b,l4_bm), add.cell.ids=c("L1","L3", "L4"), merge.data=T, project="LymphNodes")
+
+```
+
+```{r}
+#Preprocesing
+
+m26[["percent.mt"]] <- PercentageFeatureSet(m26, pattern = "^MT-")
+VlnPlot(m26, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+m26 = NormalizeData(m26, normalization.method = "LogNormalize", scale.factor = 10000)
+m26 = FindVariableFeatures(m26)
+m26 = ScaleData(m26, vars.to.regress = c("nFeature_RNA", "percent.mt"))
+m26 = RunPCA(m26, npcs = 20)
+m26 = RunUMAP(m26, dims = 1:10)
+
+#mt filtered for mitochondrial content
+
+selected_mito <- WhichCells(m26, expression = percent.mt < 5)
+selected_c <- WhichCells(m26, expression = nFeature_RNA > 200)
+selected_f <- rownames(m26)[Matrix::rowSums(m26) > 3]
+m26.filt <- subset(m26, features = selected_f, cells = selected_c)
+m26.filt <- subset(m26, cells = selected_mito)
+VlnPlot(m26.filt, group.by = "orig.ident", features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+
+#Doublet finder
+
+suppressMessages(require(DoubletFinder))
+
+m26.filt = FindVariableFeatures(m26.filt, verbose = F)
+m26.filt = ScaleData(m26.filt, vars.to.regress = c("nFeature_RNA", "percent.mt"),
+    verbose = F)
+data.filt = RunPCA(m26.filt, verbose = F, npcs = 20)
+data.filt = RunUMAP(m26.filt, dims = 1:10, verbose = F)
+
+nExp <- round(ncol(m26.filt) * 0.04)  # expect 4% doublets
+m26.filt <- doubletFinder_v3(m26.filt, pN = 0.25, pK = 0.09, nExp = nExp, PCs = 1:10)
+
+DF.name = colnames(m26.filt@meta.data)[grepl("DF.classification", colnames(m26.filt@meta.data))]
+
+
+
+cowplot::plot_grid(ncol = 2, DimPlot(m26.filt, group.by = "orig.ident") + NoAxes(),
+    DimPlot(m26.filt, group.by = DF.name) + NoAxes())
+
+m26.filt = m26.filt[, m26.filt@meta.data[, DF.name] == "Singlet"]
+dim(m26.filt)
+
+```
+
+
+```{r}
+#SCTransform and integration by study 
+
+m26.list <- SplitObject(m26, split.by = "study")
+m26.list <- lapply(X = m26.list, FUN = SCTransform)
+features <- SelectIntegrationFeatures(object.list = m26.list, nfeatures = 2000)
+m26.list <- PrepSCTIntegration(object.list = m26.list, anchor.features = features)
+immune.anchors <- FindIntegrationAnchors(object.list = m26.list, normalization.method = "SCT",
+    anchor.features = features)
+immune.combined.sct <- IntegrateData(anchorset = immune.anchors, normalization.method = "SCT")
+immune.combined.sct <- RunPCA(immune.combined.sct, verbose = FALSE)
+immune.combined.sct <- RunUMAP(immune.combined.sct, reduction = "pca", dims = 1:30)
+DimPlot(immune.combined.sct, reduction = "umap", group.by = "study")
+
+
+```
+
+```{r}
+#Add meta data with Mp2p6n status
+
+raw_ex2 <- GetAssayData(object = immune.combined.sct, slot = "counts")[c("MYC", "BCL2", "BCL6"),]
+
+
+raw_ex <- FetchData(immune.combined.sct, vars = c("MYC", "BCL2", "BCL6"))
+raw_2bin <- raw_ex
+raw_2bin[raw_2bin > 0 ] <- 1
+raw_2bin <- cbind(raw_2bin,
+                  Mp2p6n = ifelse(raw_2bin[,1] == 1 &
+                                    raw_2bin[,2] == 1 & 
+                                    raw_2bin[,3] == 1,
+                                  1,
+                                  0))
+
+
+immune.combined.sct <- AddMetaData(immune.combined.sct,
+                                 raw_2bin$Mp2p6n,
+                                 col.name = "Mp2p6n") 
+
+FeaturePlot(immune.combined.sct, features = "Mp2p6n")
+```
+
+```{r}
+#Differentially expressed genes between double positive vs all 
+
+Idents(immune.combined.sct) <- immune.combined.sct@meta.data$Mp2p6n
+DEG.markers <- FindMarkers(immune.combined.sct, ident.1 = "1", ident.2 = "0", logfc.threshold = -Inf, min.pct = -Inf, min.diff.pct = -Inf, test.use = "wilcox")
+
+
+```
+
+```{r}
+#Pathway analysis 
+
+#Load libraries
+
+library(limma)
+library(gprofiler2)
+library(clusterProfiler)
+
+# Single cell data Wiki pathway analysis using gprofiler2
+
+# Order up regulated and down regulated genes
+dds <- DEG.markers
+tt_up <- subset(dds, avg_log2FC>0 &p_val < 0.05)
+tt_up <- tt_up[order(tt_up$avg_log2FC, decreasing = T),]
+tt_down <- subset(dds, avg_log2FC <0 & p_val < 0.05)
+tt_down <- tt_down[order(tt_down$avg_log2FC, decreasing = F),]
+
+#Convert Gene Symbol to Enterez ID
+
+eg_up = bitr(tt_up$X, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+eg_down = bitr(tt_down$X, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+# Run gprofiler2
+
+gp_up_wp = gost(row.names(tt_up),significant  = F, sources = c("WP"),  organism = "hsapiens", correction_method = "fdr")
+gp_down_wp = gost(row.names(tt_down), significant = F, sources = c("WP"),  organism = "hsapiens", correction_method = "fdr")
+
+```
+
+```{r}
+#Pathway analysis for GEP cohorts 
+
+#Load dataset 
+
+dds <- read.csv("~/Downloads/Dubois.csv") 
+rownames(dds) <- dds$ensg 
+dds <- dds[,-c(1)]
+
+dds <- dds %>% distinct(ensg, .keep_all = T)
+gene_sub <- gene[match(dds$ensg, gene$Gene.stable.ID),]
+gene_sub <- gene_sub %>% distinct(Gene.stable.ID, .keep_all = T)
+dds$symbol <- gene_sub$Gene.name
+dds <- dds[!duplicated(dds$symbol),]
+rownames(dds) <- dds$symbol
+dds <- dds[,-c(1,222)]
+
+group <- read.csv("~/Downloads/grouping.csv") ## Grouping for Mp2p6n status 
+dubois_grp <- group %>% filter(group$id %in% colnames(dds))
+dubois_grp$Mp2p6n_High <- as.factor(dubois_grp$Mp2p6n_High)
+
+#Conduct Differential Gene Expression analysis
+
+fit <- limma::lmFit(dds, design = model.matrix(~dubois_grp$Mp2p6n_High))
+fit <- eBayes(fit)
+tt <- topTable(fit, n = Inf, coef = 2)
+
+# Order up regulated and down regulated genes
+
+tt_up <- subset(tt, logFC>0 &P.Value < 0.05)
+tt_up <- tt_up[order(tt_up$logFC, decreasing = T),]
+tt_down <- subset(tt, logFC <0 & P.Value < 0.05)
+tt_down <- tt_down[order(tt_down$logFC, decreasing = F),]
+
+#Convert Gene Symbol to Enterez ID 
+
+eg_up = bitr(rownames(tt), fromType="ENSEMBL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+eg_down = bitr(rownames(tt_down), fromType="ENSEMBL", toType="ENTREZID", OrgDb="org.Hs.eg.db")
+
+# Run gprofiler2
+gp_up_wp = gost(row.names(tt_up), ordered_query = F,  organism = "gp__5FcD_OtD5_Ig0", correction_method = "fdr", significant = F)
+gp_down_wp = gost(row.names(tt_down), ordered_query = F, sources = c("WP"),  organism = "hsapiens", correction_method = "fdr", significant = F)
+
+```
+

@@ -1,0 +1,144 @@
+---
+title: "Generating Spatial point patterns using windows from geojson annotations"
+author: "Gayatri Kumar"
+date: "06/02/2023"
+Contact: "gkumar@mdanderson.org, gayatri@iisc.ac.in"
+output: html_document
+---
+```{r}
+#Load relevant libraries
+library(spatstat)
+library(alphahull)
+library(tidyverse)
+library(sp)
+library(maptools)
+library(PBSmapping)
+library(sf)
+library(geojsonio)
+```
+
+```{r}
+#This script will read the CSV files and plot the points and generate an RDS file with a convex window
+files <- list.files(path="Path/To/split/CSVFiles/", full.names=TRUE)
+for (i in 1:length(files)){
+  read.file  <- read.csv(files[i] , sep=" ")
+  #print(files[i])
+  name_file <- str_split(files[i] , "/")[[1]][8]
+  df <- data.frame( x= read.file$X , y =read.file$Y )
+  w <- convexhull.xy(df$x, df$y)
+  pp <- as.ppp(df , W=w , marks=data.frame(df$label))
+  plot(pp , cex = 0.2, main="")
+  title(name_file)
+  
+  # Saving the spatial point patterns as RDS objects
+  
+  saveRDS(pp, file = paste0("Path/to/Folder/RDS_v1/" ,name_file, ".RDS"))
+}
+
+```
+
+
+```{r}
+# After Using the two masks to generate QuPath annotation as geojsons
+# "RGB_mask" is the RGB image with software generated mask
+
+geojson.list <- list.files("Path/to/Folder/RGB_mask", full.names = TRUE)
+for (j in geojson.list) {
+  #print(basename(j))
+  eq <- geojson_read(j, what='sp')
+  y <- as(eq, "SpatialPolygons")
+  p <- slot(y, "polygons")
+  v <- lapply(p, function(z) { SpatialPolygons(list(z)) })
+  winlist <- lapply(v, as.owin)
+  win <- winlist[[1]]
+  
+# We load the mask generated using the overlaid points on the RGB image with the mask
+  
+  geo.list <- list.files("Path/to/Folder/opencv_mask", full.names = TRUE)
+  empty_list <- vector(mode = "list")
+  for (k in geo.list) {empty_list <- c(empty_list, basename(k))}
+  
+  if ( is.element(basename(j),empty_list) == FALSE) {
+    y1 <- as(eq, "SpatialPolygons")
+    p1 <- slot(y1, "polygons")
+    v1 <- lapply(p1, function(z) { SpatialPolygons(list(z)) })
+    winlist1 <- lapply(v1, as.owin)
+    win <- winlist1[[1]]
+    rds <- tools::file_path_sans_ext(j)
+    rds.name <- basename(rds)
+    filename <-  basename(rds)
+    rds.fullpath <- paste("Path/to/Folder/RDS_v1/", rds.name, ".RDS", sep="")
+    pp <- readRDS(rds.fullpath)
+    x.win <- (win$xrange[[2]]-win$xrange[[1]])/(pp$window$xrange[[2]]-pp$window$xrange[[1]])*(pp$x-pp$window$xrange[[1]])+win$xrange[[1]]
+    y.win <- (win$yrange[[2]]-win$yrange[[1]])/(pp$window$yrange[[2]]-pp$window$yrange[[1]])*(pp$y-pp$window$yrange[[1]])+win$yrange[[1]]
+    new.owin.pp <- ppp(x = x.win, y=y.win, window = win)
+    new.owin.ppp <- ppp(x = x.win, y=y.win, window = win , marks=pp$marks)
+    points.outside <- pp$n-npoints(new.owin.pp)
+    print(paste(filename, "Total points:", pp$n,"Points outside:", points.outside,
+                "Percentage of points lying outside", round((points.outside/pp$n)*100,2)))
+    tiff.name <- paste("Path/to/Folder/figures_out/",filename,".tiff",sep = "")
+    tiff(tiff.name, compression = "lzw")
+    plot.ppp(new.owin.pp, main = filename)
+    dev.off()
+    cat(paste(filename, "Total points:", pp$n,"Points outside:", points.outside,
+              "Percentage of points lying outside", round((points.outside/pp$n)*100,2) , "\n"),
+        file="Path/to/Folder/outfile_.txt",append=TRUE)
+    saveRDS(new.owin.ppp, file = paste0("Path/to/Folder/RDS_v2/" ,strsplit(basename(j) , ".geojson")[[1]], ".RDS"))
+    }
+  
+  for (k in geo.list) {
+    if (basename(j) == basename(k)) {
+      eq1 <- geojson_read(k, what='sp')
+      y1 <- as(eq1, "SpatialPolygons")
+      p1 <- slot(y1, "polygons")
+      v1 <- lapply(p1, function(z) { SpatialPolygons(list(z)) })
+      winlist1 <- lapply(v1, as.owin)
+
+      win <- winlist1[[1]]
+      if (length(winlist1) > 1) {
+         for (i in seq(2, length(winlist1))) {
+            win <- union.owin(win, winlist1[[i]])
+       }
+    }
+   e <- setminus.owin(winlist[[1]] , win)
+   win <- e
+    #plot(e, add=FALSE, col="lightblue", main = basename)
+      rds <- tools::file_path_sans_ext(j)
+      rds.name <- basename(rds)
+      filename <-  basename(rds)
+      
+# Loading the original spatial point patterns and replacing the convex window with the new       annotation.
+      
+      rds.fullpath <- paste("Path/to/Folder/RDS_v1/", rds.name, ".RDS", sep="")
+      pp <- readRDS(rds.fullpath)
+      #plot(pp)
+      x.win <- (win$xrange[[2]]-win$xrange[[1]])/(pp$window$xrange[[2]]-pp$window$xrange[[1]])*(pp$x-pp$window$xrange[[1]])+win$xrange[[1]]
+      y.win <- (win$yrange[[2]]-win$yrange[[1]])/(pp$window$yrange[[2]]-pp$window$yrange[[1]])*(pp$y-pp$window$yrange[[1]])+win$yrange[[1]]
+      new.owin.pp <- ppp(x = x.win, y=y.win, window = win)
+      new.owin.ppp <- ppp(x = x.win, y=y.win, window = win , marks=pp$marks)
+
+      points.outside <- pp$n-npoints(new.owin.pp)
+      
+  # Plotting and saving the new point pattern object for reviewing.
+      
+      tiff.name <- paste("Path/to/Folder/figures_out/",filename,".tiff",sep = "")
+      tiff(tiff.name, compression = "lzw")
+      plot.ppp(new.owin.pp, main = filename)
+      dev.off()
+      
+  # "outfile" stores the output viz. percentage of points excluded using the two annotations
+      
+      cat(paste(filename, "Total points:", pp$n,"Points outside:", points.outside,
+          "Percentage of points lying outside", round((points.outside/pp$n)*100,2) ,
+          "\n"), file="Path/to/Folder/outfile.txt",append=TRUE)
+      
+  # Saving point pattern objects with windows built from the two geojson annotations.
+      
+    saveRDS(new.owin.ppp, file = paste0("Path/to/Folder/RDS_v2/" ,strsplit(basename(j) , ".geojson")[[1]], ".RDS"))
+    }
+  }
+}
+
+```
+
+
